@@ -3,44 +3,31 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
-use App\Models\ProductImage;
 use App\Models\Product;
-use App\Models\Category;
+use App\Models\ProductImage;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
-use Intervention\Image\Facades\Image as ImageFacade;
+use Intervention\Image\Laravel\Facades\Image as ImageFacade;
 
 class ImageController extends Controller
 {
     /**
      * Display a listing of the resource.
      */
-    public function index(Request $request)
+    public function index()
     {
         $query = ProductImage::with(['product', 'product.category']);
         
-        // Apply filters if provided
-        if ($request->has('product') && $request->product != '') {
-            $query->where('product_id', $request->product);
-        }
-        
-        if ($request->has('category') && $request->category != '') {
-            $query->whereHas('product.category', function ($q) use ($request) {
-                $q->where('id', $request->category);
+        if (request()->has('search')) {
+            $search = request()->get('search');
+            $query->whereHas('product', function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%");
             });
         }
         
-        if ($request->has('search') && $request->search != '') {
-            $query->whereHas('product', function ($q) use ($request) {
-                $q->where('name', 'like', '%' . $request->search . '%');
-            });
-        }
+        $images = $query->orderBy('created_at', 'desc')->paginate(20);
         
-        $images = $query->latest()->paginate(12);
-        $products = Product::all();
-        $categories = Category::all();
-        
-        return view('admin.images.index', compact('images', 'products', 'categories'));
+        return view('admin.images.index', compact('images'));
     }
 
     /**
@@ -50,35 +37,29 @@ class ImageController extends Controller
     {
         $request->validate([
             'product_id' => 'required|exists:products,id',
-            'images.*' => 'required|image|mimes:jpeg,png,jpg,gif,webp|max:2048',
+            'images.*' => 'required|image|max:2048',
+            'set_primary' => 'boolean'
         ]);
-        
+
         $product = Product::findOrFail($request->product_id);
-        $images = $request->file('images');
-        
-        // Limit to 5 images per upload
-        if (count($images) > 5) {
-            return response()->json([
-                'success' => false,
-                'message' => 'You can only upload up to 5 images at a time.'
-            ]);
-        }
-        
+        $setPrimary = $request->boolean('set_primary', false);
         $uploadedImages = [];
-        $setPrimary = $request->has('set_primary');
-        
-        foreach ($images as $index => $imageFile) {
-            // Generate unique filename
-            $filename = time() . '_' . uniqid() . '.' . $imageFile->getClientOriginalExtension();
+
+        foreach ($request->file('images') as $index => $imageFile) {
+            // Generate unique filenames
+            $filename = uniqid() . '_' . $imageFile->getClientOriginalName();
+            $thumbnailFilename = 'thumb_' . $filename;
+            
+            // Define paths
             $path = 'products/' . $filename;
+            $thumbnailPath = 'products/thumbnails/' . $thumbnailFilename;
+            
+            // Create and store thumbnail
+            $thumbnail = ImageFacade::make($imageFile)->fit(300, 300);
+            Storage::put($thumbnailPath, $thumbnail->encode());
             
             // Store original image
-            $imageFile->storeAs('public/products', $filename);
-            
-            // Create thumbnail
-            $thumbnailPath = 'products/thumbnails/' . $filename;
-            $thumbnail = ImageFacade::make($imageFile)->fit(300, 300);
-            Storage::disk('public')->put($thumbnailPath, $thumbnail->encode());
+            Storage::put($path, file_get_contents($imageFile));
             
             // Determine if this should be the primary image
             $isPrimary = $setPrimary && $index === 0;
@@ -116,7 +97,7 @@ class ImageController extends Controller
         $image = ProductImage::findOrFail($id);
         
         // Delete image files from storage
-        Storage::disk('public')->delete([
+        Storage::delete([
             $image->image_path,
             $image->thumbnail_path
         ]);
@@ -127,28 +108,6 @@ class ImageController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Image deleted successfully!'
-        ]);
-    }
-    
-    /**
-     * Set the specified image as primary for its product.
-     */
-    public function setPrimary(string $id)
-    {
-        $image = ProductImage::findOrFail($id);
-        
-        // Unset any existing primary image for this product
-        ProductImage::where('product_id', $image->product_id)
-            ->where('is_primary', true)
-            ->update(['is_primary' => false]);
-        
-        // Set this image as primary
-        $image->is_primary = true;
-        $image->save();
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'Primary image updated successfully!'
         ]);
     }
 }
